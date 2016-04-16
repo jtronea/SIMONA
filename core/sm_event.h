@@ -28,16 +28,19 @@ typedef struct _Event
 	int					*fd; 					//和客户端连接的文件描述符
 	int					*usfd;					//用于up stream的文件描述符
 	EventState 			event_state;			//用于标识事件状态
-	EventType			event_type;				//用于标识事件类型
+	int     			event_type;				//用于标识事件类型
 	void* 				mem_space;   			//内存首地址
 	int 				mem_offset;  			//内存偏移
 	Command* 			commands; 				//记录一系列操作的指令指令
 	void*				callback;
 }Event;
 
-typedef struct _WorkInitData
+typedef struct _WorkerRecordData
 {
-	pthread_cond_t*			cond;
-	int 					index;
-}WorkInitData;
+	pthread_cond_t*			cond;				//让该线程唤起的条件；
+	int 					index;				//该工作线程的序号
+	int 					freepos;			//该工作线程的事件池的空位置
+	int 					busypos;			//该工作线程的事件池的忙位置
+	int 					eventsnum;			//事件的数量
+}WorkerRecordData;
 #endif
