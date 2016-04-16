@@ -5,16 +5,16 @@
 
 typedef enum _EventType
 {
-	EventType_INVALID = 0;
-	EventType_CAN_READ = 0x00000001;
-	EventType_CAN_WRITE= 0x00000002;
+	EventType_INVALID = 0,
+	EventType_CAN_READ = 0x00000001,
+	EventType_CAN_WRITE= 0x00000002
 }EventType;
 
 typedef enum _EventState
 {
-	EventState_INVALID = 0;
-	EventState_ACTIVE;
-	EventState_INACTIVE;
+	EventState_INVALID = 0,
+	EventState_ACTIVE,
+	EventState_INACTIVE
 }EventState;
 
 typedef struct _Command

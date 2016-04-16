@@ -1,4 +1,5 @@
 #include "simona.h"
+#include "sm_event.h"
 
 pthread_t threadspool[WORKERTHREADS];       //存放线程
 pthread_cond_t condspool[WORKERTHREADS];    //存放每个工作线程的cond
@@ -7,10 +8,8 @@ void** mempool = NULL;
 
 int create_and_bind(const char * port) {
     struct addrinfo hints;
-    struct addrinfo * result,
-    *rp;
-    int s,
-    sfd;
+    struct addrinfo * result, *rp;
+    int s, sfd;
 
     memset( & hints, 0, sizeof(struct addrinfo));
     hints.ai_family = AF_UNSPEC;
@@ -26,11 +25,11 @@ int create_and_bind(const char * port) {
         return - 1;
     }
 
-    for (rp = result; rp != NULL; rp = rp - >ai_next) {
-        sfd = socket(rp - >ai_family, rp - >ai_socktype, rp - >ai_protocol);
+    for (rp =result; rp != NULL; rp = rp->ai_next) {
+        sfd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
         if (sfd == -1) continue;
 
-        s = bind(sfd, rp - >ai_addr, rp - >ai_addrlen);
+        s = bind(sfd, rp->ai_addr, rp->ai_addrlen);
         if (s == 0) {
             /* We managed to bind successfully! */
             break;
@@ -71,33 +70,34 @@ int make_socket_non_blocking(int sfd) {
     return 0;
 }
 
-int add_read_event(int fd)
+int add_read_event(int efd, int fd)
 {
     struct epoll_event event;
     event.data.fd = fd;
     event.events = EPOLLIN | EPOLLET; //读入,边缘触发方式  
-    s = epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &event);
+    int s = epoll_ctl(efd, EPOLL_CTL_ADD, fd, &event);
     return s;
 }
 
-int add_write_event(int fd)
+int add_write_event(int efd, int fd)
 {
     struct epoll_event event;
     event.data.fd = fd;
     event.events =  EPOLLOUT | EPOLLET; //读入,边缘触发方式  
-    s = epoll_ctl(efd, EPOLL_CTL_ADD, sfd, &event);
+    int s = epoll_ctl(efd, EPOLL_CTL_ADD, fd, &event);
     return s;
 }
 
-int init_event(Event** eventpool, void*** mempool){
-    *eventpool = (Event* ) calloc(MAXCONNECTION, sizeof Event);
+int init_event(Event** eventpool, void*** mempool)
+{
+    *eventpool = (Event* ) calloc(MAXCONNECTION, sizeof(Event));
     if(*eventpool == NULL)
     {
         return -1;
     }
     memset(*eventpool, 0, MAXCONNECTION * sizeof(Event));
 
-    *mempool = (void* *) calloc(MAXCONNECTION, sizeof void*);
+    *mempool = (void**) calloc(MAXCONNECTION, sizeof(void*));
     if(*mempool == NULL)
     {
         return -1;
@@ -117,27 +117,29 @@ int init_event(Event** eventpool, void*** mempool){
     return 0;
 }
 
+void* handle_task(void* data){
+    pthread_cond_t* wakeUpCond = ((WorkInitData*)data)->cond;
+    int index = ((WorkInitData*)data)->index;
+
+    pthread_cond_init(wakeUpCond, NULL);
+    pthread_mutex_t mutex;
+    for ( ; ; )
+    {
+        pthread_cond_wait(wakeUpCond, &mutex);
+        printf("work %d start handle task\n", index);
+    }
+}
+
 int spawn_multi_workthread(){
     for(int i = 0; i < WORKERTHREADS; i++)
     {
         WorkInitData data;
-        memset(&data, 0, sizeof WorkInitData);
-        data.cond = &condspoos[i];
+        memset(&data, 0, sizeof(WorkInitData));
+        data.cond = &condspool[i];
         data.index = i;
-        int err = pthread_create(threadspool[i], NULL, &handle_task, &data);
+        pthread_create(&threadspool[i], NULL, &handle_task, &data);
     }
-}
-
-int handle_task(void* data){
-    pthread_cond_t* wakeUpCond = (WorkInitData*)data->cond;
-    int index = (WorkInitData*)data->index;
-
-    pthread_cond_init(wakeUpCond, NULL);
-    for ( ; ; )
-    {
-        pthread_cond_wait(wakeUpCond, NULL);
-        // Event eve = get_event();
-    }
+    return 0;
 }
 
 int main(int argc, char * argv[]) {
@@ -171,14 +173,14 @@ int main(int argc, char * argv[]) {
         abort();
     }
 
-    s = add_read_event(sfd);
+    s = add_read_event(efd, sfd);
     if (s == -1) {
         perror("epoll_ctl");
         abort();
     }
 
     /* Buffer where events are returned */
-    events = (epoll_event * ) calloc(MAXEVENTS, sizeof event);
+    events = (epoll_event * ) calloc(MAXEVENTS, sizeof(event));
 
     /* The event loop */
     while (1) {
@@ -205,7 +207,7 @@ int main(int argc, char * argv[]) {
                     char hbuf[NI_MAXHOST],
                     sbuf[NI_MAXSERV];
 
-                    in_len = sizeof in_addr;
+                    in_len = sizeof(in_addr);
                     infd = accept(sfd, &in_addr, &in_len);
                     if (infd == -1) {
                         if ((errno == EAGAIN) || (errno == EWOULDBLOCK)) {
@@ -219,7 +221,7 @@ int main(int argc, char * argv[]) {
                     }
 
                     //将地址转化为主机名或者服务名  
-                    s = getnameinfo( & in_addr, in_len, hbuf, sizeof hbuf, sbuf, sizeof sbuf, NI_NUMERICHOST | NI_NUMERICSERV); //flag参数:以数字名返回  
+                    s = getnameinfo( & in_addr, in_len, hbuf, sizeof(hbuf), sbuf, sizeof(sbuf), NI_NUMERICHOST | NI_NUMERICSERV); //flag参数:以数字名返回  
                     //主机地址和服务地址  
                     if (s == 0) {
                         printf("Accepted connection on descriptor %d ""(host=%s, port=%s)\n", infd, hbuf, sbuf);
@@ -230,7 +232,7 @@ int main(int argc, char * argv[]) {
                     s = make_socket_non_blocking(infd);
                     if (s == -1) abort();
 
-                    s = add_read_event(infd);
+                    s = add_read_event(efd, infd);
                     if (s == -1) {
                         perror("epoll_ctl");
                         abort();

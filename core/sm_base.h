@@ -21,5 +21,5 @@
 #include	<sys/un.h>		/* for Unix domain sockets */
 #include 	<time.h>
 #include    <sys/epoll.h> 
-
+#include    <pthread.h>
 #endif
