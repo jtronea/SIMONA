@@ -3,8 +3,10 @@
 
 pthread_t threadspool[WORKERTHREADS];       //存放线程
 pthread_cond_t condspool[WORKERTHREADS];    //存放每个工作线程的cond
-Event* eventpool = NULL;
+Event** eventpool = NULL;
 void** mempool = NULL;
+Event* activeeventpool[MAXCONNECTION] = {NULL}; //存放活跃的事件数量, [i*MAXCONNECTION/WORKERTHREADS,(i+1)*MAXCONNECTION/WORKERTHREADS]被第i个工作线程做拥有
+WorkerRecordData* workerRecords[WORKERTHREADS];
 
 int create_and_bind(const char * port) {
     struct addrinfo hints;
@@ -18,7 +20,6 @@ int create_and_bind(const char * port) {
     /* We want a TCP socket */
     hints.ai_flags = AI_PASSIVE;
     /* All interfaces */
-
     s = getaddrinfo(NULL, port, &hints, &result);
     if (s != 0) {
         fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(s));
@@ -88,14 +89,25 @@ int add_write_event(int efd, int fd)
     return s;
 }
 
-int init_event(Event** eventpool, void*** mempool)
+int init_event(Event*** eventpool, void*** mempool)
 {
-    *eventpool = (Event* ) calloc(MAXCONNECTION, sizeof(Event));
+    *eventpool = (Event** ) calloc(MAXCONNECTION, sizeof(Event*));
     if(*eventpool == NULL)
     {
         return -1;
     }
-    memset(*eventpool, 0, MAXCONNECTION * sizeof(Event));
+    for(int i = 0; i < MAXCONNECTION; i++)
+    {
+        (*eventpool)[i] = (Event*) calloc(1, sizeof(Event));
+        if((*eventpool)[i] == NULL)
+        {
+            return -1;
+        }
+        else
+        {
+            memset((*eventpool)[i], 0, sizeof(Event));
+        }
+    }
 
     *mempool = (void**) calloc(MAXCONNECTION, sizeof(void*));
     if(*mempool == NULL)
@@ -104,40 +116,126 @@ int init_event(Event** eventpool, void*** mempool)
     }
     for(int i = 0; i < MAXCONNECTION; i++)
     {
-        *mempool[i] = (void*) calloc(MEMPOOLSIZE, 1);
-        if(*mempool[i] == NULL)
+        (*mempool)[i] = (void*) calloc(MEMPOOLSIZE, 1);
+        if((*mempool)[i] == NULL)
         {
             return -1;
         }
         else
         {
-            memset(*mempool[i], 0, MEMPOOLSIZE);
+            memset((*mempool)[i], 0, MEMPOOLSIZE);
+        }
+    }
+
+    for(int i = 0; i < WORKERTHREADS; i++)
+    {
+        workerRecords[i] = (WorkerRecordData*) calloc(1, sizeof(WorkerRecordData));
+        if(workerRecords[i] == NULL)
+        {
+            return -1;
+        }
+        else
+        {
+            memset(workerRecords[i], 0, sizeof(WorkerRecordData));
         }
     }
     return 0;
 }
 
-void* handle_task(void* data){
-    pthread_cond_t* wakeUpCond = ((WorkInitData*)data)->cond;
-    int index = ((WorkInitData*)data)->index;
+int event_handle(Event* event)
+{
+    char buf[512] = {0};
+    read(*event->fd, buf, sizeof(buf));
+    write(*event->fd, buf, sizeof(buf));
+    close(*event->fd);
+}
 
-    pthread_cond_init(wakeUpCond, NULL);
+void* handle_task(void* data){
+    WorkerRecordData* record = (WorkerRecordData*)data;
+    pthread_cond_t* wakeUpCond = record->cond;
+    int index = record->index;
+
+    int err = pthread_cond_init(wakeUpCond, NULL);
     pthread_mutex_t mutex;
+    err = pthread_mutex_init(&mutex, NULL);
     for ( ; ; )
     {
         pthread_cond_wait(wakeUpCond, &mutex);
-        printf("work %d start handle task\n", index);
+        for( ; ; )
+        {
+            printf("work %d start handle task\n", index);
+            int start = MAXCONNECTION/WORKERTHREADS * index + record->busypos;
+            Event* event = activeeventpool[start];
+            event_handle(event);
+            record->eventsnum --; //todo: lock later
+            record->freepos --; //todo: lock later
+            if(record->eventsnum == 0)
+            {
+                break;
+            }
+        }
     }
 }
 
-int spawn_multi_workthread(){
+int spawn_multi_workerthread(){
     for(int i = 0; i < WORKERTHREADS; i++)
     {
-        WorkInitData data;
-        memset(&data, 0, sizeof(WorkInitData));
-        data.cond = &condspool[i];
-        data.index = i;
-        pthread_create(&threadspool[i], NULL, &handle_task, &data);
+        WorkerRecordData* data = workerRecords[i];
+        memset(data, 0, sizeof(WorkerRecordData));
+        data->cond = &condspool[i];
+        data->index = i;
+        data->freepos = 0;
+        data->busypos = 0;
+        pthread_create(&threadspool[i], NULL, &handle_task, data);
+    }
+    return 0;
+}
+
+int delete_event(int fd){
+    memset(eventpool[fd], 0, sizeof(Event));
+}
+
+int generate_fd_event(int fd){
+    if(eventpool[fd]->index != 0)
+        return -1;
+
+    eventpool[fd]->index = fd;
+    eventpool[fd]->fd = &fd;
+    eventpool[fd]->event_state = EventState_INACTIVE;
+}
+
+long GetTickUSCount()
+{
+    struct timeval tv;
+    gettimeofday(&tv,NULL);
+    return (tv.tv_sec*1000000 + tv.tv_usec);    
+}
+
+int load_balance(){
+    return GetTickUSCount() % WORKERTHREADS;
+}
+
+int set_event_to_worker(Event* event, int workerid)
+{
+    WorkerRecordData* record = workerRecords[workerid];
+    if(record->eventsnum < MAXCONNECTION/WORKERTHREADS)
+    {
+        int start = MAXCONNECTION/WORKERTHREADS * workerid + record->freepos;
+        activeeventpool[start] = event;
+        
+        //char buf[128]={0};
+        //read (*(event->fd), buf, sizeof buf);
+
+        record->eventsnum ++; //todo: lock later
+        record->freepos ++;
+        if(record->eventsnum == 1)
+        {
+            pthread_cond_signal(&condspool[workerid]);
+        }
+    }
+    else
+    {
+        return -1;
     }
     return 0;
 }
@@ -148,6 +246,7 @@ int main(int argc, char * argv[]) {
     struct epoll_event event;
     struct epoll_event * events;
     init_event(&eventpool, &mempool);
+    spawn_multi_workerthread();
     /*  if (argc != 2)  
     {  
       fprintf (stderr, "Usage: %s [port]\n", argv[0]);  
@@ -194,6 +293,7 @@ int main(int argc, char * argv[]) {
                  ready for reading (why were we notified then?) */
                 fprintf(stderr, "epoll error\n");
                 close(events[i].data.fd);
+                delete_event(events[i].data.fd);
                 continue;
             }
 
@@ -231,74 +331,33 @@ int main(int argc, char * argv[]) {
                      list of fds to monitor. */
                     s = make_socket_non_blocking(infd);
                     if (s == -1) abort();
-
+                    
                     s = add_read_event(efd, infd);
                     if (s == -1) {
                         perror("epoll_ctl");
                         abort();
                     }
+
+                    generate_fd_event(infd);
                 }
                 continue;
             } else if (events[i].events & EPOLLIN) {
-                /* We have data on the fd waiting to be read. Read and 
-                 display it. We must read whatever data is available 
-                 completely, as we are running in edge-triggered mode 
-                 and won't get a notification again for the same 
-                 data. */
-                int done = 0;
-
-                while (1) {
-                    ssize_t count;
-                    char buf[512];
-
-                    count = read(events[i].data.fd, buf, sizeof(buf));
-                    if (count == -1) {
-                        /* If errno == EAGAIN, that means we have read all 
-                         data. So go back to the main loop. */
-                        if (errno != EAGAIN) {
-                            perror("read");
-                            done = 1;
-                        }
-                        break;
-                    } else if (count == 0) {
-                        /* End of file. The remote has closed the 
-                         connection. */
-                        done = 1;
-                        break;
-                    }
-
-                    /* Write the buffer to standard output */
-                    s = write(events[i].data.fd, buf, count);
-                    if (s == -1) {
-                        perror("write");
-                        abort();
-                    }
+                Event* fdEvent = eventpool[events[i].data.fd];
+                fdEvent->fd = &(events[i].data.fd);
+                if(fdEvent->event_state == EventState_ACTIVE)
+                {
+                    //todo:should add lock, because work thread may change the value
+                    fdEvent->event_type = fdEvent->event_type | EventType_CAN_READ;                    
                 }
-
-                if (done) {
-                    printf("Closed connection on descriptor %d\n", events[i].data.fd);
-
-                    /* Closing the descriptor will make epoll remove it 
-                     from the set of descriptors which are monitored. */
-                    close(events[i].data.fd);
+                else
+                {
+                    fdEvent->event_type = fdEvent->event_type | EventType_CAN_READ; 
+                    fdEvent->event_state = EventState_ACTIVE;
                 }
+                int workerid = load_balance();
+                set_event_to_worker(fdEvent, workerid);
             } 
-            // else if (events[i].events & EPOLLOUT) {
-            //     printf("fd %d triger write event\n", events[i].data.fd);
-            //     int done = 0;
-            //     ssize_t count;
-            //     char buf[8192000];
-            //     for (int i = 0; i < 8192000; i++) {
-            //         buf[i] = 'a';
-            //     }
-            //     s = write(events[i].data.fd, buf, sizeof buf);
-            //     if (s < 0) {
-            //         perror("write error");
-            //         //abort (); 
-            //         int state = epoll_ctl(efd, EPOLL_CTL_DEL, events[i].data.fd, &event);
-            //         close(events[i].data.fd);
-            //     }
-            // }
+
         }
     }
 
