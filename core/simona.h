@@ -7,9 +7,9 @@
 #define	SA	struct sockaddr
 #define MAXLEN 1024
 #define	LISTENQ		1024
-#define MAXCONNECTION 10000//最大连接数
+#define MAXCONNECTION 100//最大连接数
 #define MEMPOOLSIZE 4096//内存池中单个内存的大小
-#define WORKERTHREADS 1//工作线程数
+#define WORKERTHREADS 10//工作线程数
 
 int make_socket_non_blocking(int sfd);
 

@@ -3,11 +3,11 @@
 
 pthread_t threadspool[WORKERTHREADS];       //存放线程
 pthread_cond_t condspool[WORKERTHREADS];    //存放每个工作线程的cond
+pthread_mutex_t mutexpool[WORKERTHREADS];    //存放每个工作线程的cond
 Event** eventpool = NULL;
 void** mempool = NULL;
-Event* activeeventpool[MAXCONNECTION] = {NULL}; //存放活跃的事件数量, [i*MAXCONNECTION/WORKERTHREADS,(i+1)*MAXCONNECTION/WORKERTHREADS]被第i个工作线程做拥有
+Event* activeeventpool[MAXCONNECTION*WORKERTHREADS] = {NULL}; //存放活跃的事件数量, [i*MAXCONNECTION,(i+1)*MAXCONNECTION]被第i个工作线程做拥有
 WorkerRecordData* workerRecords[WORKERTHREADS];
-
 int create_and_bind(const char * port) {
     struct addrinfo hints;
     struct addrinfo * result, *rp;
@@ -71,12 +71,23 @@ int make_socket_non_blocking(int sfd) {
     return 0;
 }
 
+int delete_event(Event* event)
+{
+    int efd = event->efd;
+    int fd = event->fd;
+    struct epoll_event ep_event;
+    ep_event.data.fd = fd;
+    ep_event.events = EPOLLIN | EPOLLET; //读入,边缘触发方式  
+    int s = epoll_ctl(efd, EPOLL_CTL_DEL, fd, &ep_event);
+    return s;
+}
+
 int add_read_event(int efd, int fd)
 {
-    struct epoll_event event;
-    event.data.fd = fd;
-    event.events = EPOLLIN | EPOLLET; //读入,边缘触发方式  
-    int s = epoll_ctl(efd, EPOLL_CTL_ADD, fd, &event);
+    struct epoll_event ep_event;
+    ep_event.data.fd = fd;
+    ep_event.events = EPOLLIN | EPOLLET; //读入,边缘触发方式  
+    int s = epoll_ctl(efd, EPOLL_CTL_ADD, fd, &ep_event);
     return s;
 }
 
@@ -91,12 +102,12 @@ int add_write_event(int efd, int fd)
 
 int init_event(Event*** eventpool, void*** mempool)
 {
-    *eventpool = (Event** ) calloc(MAXCONNECTION, sizeof(Event*));
+    *eventpool = (Event** ) calloc(MAXCONNECTION*WORKERTHREADS, sizeof(Event*));
     if(*eventpool == NULL)
     {
         return -1;
     }
-    for(int i = 0; i < MAXCONNECTION; i++)
+    for(int i = 0; i < MAXCONNECTION*WORKERTHREADS; i++)
     {
         (*eventpool)[i] = (Event*) calloc(1, sizeof(Event));
         if((*eventpool)[i] == NULL)
@@ -109,12 +120,12 @@ int init_event(Event*** eventpool, void*** mempool)
         }
     }
 
-    *mempool = (void**) calloc(MAXCONNECTION, sizeof(void*));
+    *mempool = (void**) calloc(MAXCONNECTION*WORKERTHREADS, sizeof(void*));
     if(*mempool == NULL)
     {
         return -1;
     }
-    for(int i = 0; i < MAXCONNECTION; i++)
+    for(int i = 0; i < MAXCONNECTION*WORKERTHREADS; i++)
     {
         (*mempool)[i] = (void*) calloc(MEMPOOLSIZE, 1);
         if((*mempool)[i] == NULL)
@@ -145,9 +156,21 @@ int init_event(Event*** eventpool, void*** mempool)
 int event_handle(Event* event)
 {
     char buf[512] = {0};
-    read(*event->fd, buf, sizeof(buf));
-    write(*event->fd, buf, sizeof(buf));
-    close(*event->fd);
+    read(event->fd, buf, sizeof(buf));
+    
+    for(int i = 0; i < strlen(buf) / 2; i++)
+    {
+        char tmp = buf[i];
+        buf[i] = buf[strlen(buf) - i - 1];
+        buf[strlen(buf) - i - 1] = tmp;
+    }
+
+    write(event->fd, buf, sizeof(buf));
+    printf("write data on fd %d\n", event->fd);
+    delete_event(event);
+    printf("remove event on fd %d\n", event->fd);
+    close(event->fd);
+    printf("close fd %d\n", event->fd);
 }
 
 void* handle_task(void* data){
@@ -163,16 +186,25 @@ void* handle_task(void* data){
         pthread_cond_wait(wakeUpCond, &mutex);
         for( ; ; )
         {
-            printf("work %d start handle task\n", index);
-            int start = MAXCONNECTION/WORKERTHREADS * index + record->busypos;
+            int start = MAXCONNECTION * index + record->busypos;
+            printf("work start pos :  %d\n", start);
             Event* event = activeeventpool[start];
+            printf("work %d start handle task begin handle fd %d\n", index, event->fd);
             event_handle(event);
+            pthread_mutex_lock(mutexpool+index);
             record->eventsnum --; //todo: lock later
-            record->freepos --; //todo: lock later
+            record->busypos ++;
+            if(record->busypos >= MAXCONNECTION)
+            {
+                record->busypos = record->busypos % MAXCONNECTION;
+            }
+            printf("busypos:%d freepos:%d\n", record->busypos, record->freepos);
             if(record->eventsnum == 0)
             {
+                pthread_mutex_unlock(mutexpool+index);
                 break;
             }
+            pthread_mutex_unlock(mutexpool+index);
         }
     }
 }
@@ -191,16 +223,17 @@ int spawn_multi_workerthread(){
     return 0;
 }
 
-int delete_event(int fd){
+int free_event(int fd){
     memset(eventpool[fd], 0, sizeof(Event));
 }
 
-int generate_fd_event(int fd){
+int generate_fd_event(int fd, int efd){
     if(eventpool[fd]->index != 0)
         return -1;
 
     eventpool[fd]->index = fd;
-    eventpool[fd]->fd = &fd;
+    eventpool[fd]->fd = fd;
+    eventpool[fd]->efd = efd;
     eventpool[fd]->event_state = EventState_INACTIVE;
 }
 
@@ -218,20 +251,24 @@ int load_balance(){
 int set_event_to_worker(Event* event, int workerid)
 {
     WorkerRecordData* record = workerRecords[workerid];
-    if(record->eventsnum < MAXCONNECTION/WORKERTHREADS)
+    if(record->eventsnum < MAXCONNECTION)
     {
-        int start = MAXCONNECTION/WORKERTHREADS * workerid + record->freepos;
+        int start = MAXCONNECTION * workerid + record->freepos;
         activeeventpool[start] = event;
+        printf("set fd %d to worker %d in pos %d\n", event->fd, workerid, start);
         
-        //char buf[128]={0};
-        //read (*(event->fd), buf, sizeof buf);
-
+        pthread_mutex_lock(mutexpool+workerid);
         record->eventsnum ++; //todo: lock later
         record->freepos ++;
+        if(record->freepos >= MAXCONNECTION)
+        {
+            record->freepos = record->freepos % (MAXCONNECTION);
+        }
         if(record->eventsnum == 1)
         {
             pthread_cond_signal(&condspool[workerid]);
         }
+        pthread_mutex_unlock(mutexpool+workerid);
     }
     else
     {
@@ -240,12 +277,35 @@ int set_event_to_worker(Event* event, int workerid)
     return 0;
 }
 
+void signal_handler(int signo)
+{
+    fprintf(stderr, "signal %d happen\n", signo);
+}
+
+int init_sig()
+{
+    //signal(SIGPIPE, signal_handler);
+}
+
+int init_mutex(pthread_mutex_t* mutexpool)
+{
+    for(int i = 0;i < WORKERTHREADS; i++)
+    {
+        pthread_mutex_init(mutexpool+i, NULL);
+    }
+
+}
+
 int main(int argc, char * argv[]) {
     int sfd, s;
     int efd;
     struct epoll_event event;
     struct epoll_event * events;
+    init_sig();
     init_event(&eventpool, &mempool);
+    init_mutex(mutexpool);
+    
+    
     spawn_multi_workerthread();
     /*  if (argc != 2)  
     {  
@@ -260,13 +320,16 @@ int main(int argc, char * argv[]) {
     if (s == -1) abort();
 
     s = listen(sfd, SOMAXCONN);
+    printf("listen on fd %d\n", sfd);
     if (s == -1) {
         perror("listen");
         abort();
     }
 
+
     //除了参数size被忽略外,此函数和epoll_create完全相同  
     efd = epoll_create1(0);
+    printf("epoll on fd %d\n", efd);
     if (efd == -1) {
         perror("epoll_create");
         abort();
@@ -283,24 +346,24 @@ int main(int argc, char * argv[]) {
 
     /* The event loop */
     while (1) {
-        int n,
-        i;
+        int n, i;
 
         n = epoll_wait(efd, events, MAXEVENTS, -1);
         for (i = 0; i < n; i++) {
             if ((events[i].events & EPOLLERR) || (events[i].events & EPOLLHUP) || (!(events[i].events & EPOLLIN || events[i].events & EPOLLOUT))) {
                 /* An error has occured on this fd, or the socket is not 
                  ready for reading (why were we notified then?) */
-                fprintf(stderr, "epoll error\n");
+                fprintf(stderr, "epoll error on fd%d\n",events[i].data.fd);
                 close(events[i].data.fd);
-                delete_event(events[i].data.fd);
+                free_event(events[i].data.fd);
                 continue;
             }
 
             else if (sfd == events[i].data.fd) {
                 /* We have a notification on the listening socket, which 
                  means one or more incoming connections. */
-                while (1) {
+                 while (1) {
+                    //printf("try to accepted connection on descriptor %d\n", sfd);
                     struct sockaddr in_addr;
                     socklen_t in_len;
                     int infd;
@@ -338,12 +401,12 @@ int main(int argc, char * argv[]) {
                         abort();
                     }
 
-                    generate_fd_event(infd);
+                    generate_fd_event(infd, efd);
+                    printf("occupy event on fd %d\n", infd);
                 }
-                continue;
             } else if (events[i].events & EPOLLIN) {
                 Event* fdEvent = eventpool[events[i].data.fd];
-                fdEvent->fd = &(events[i].data.fd);
+                fdEvent->fd = events[i].data.fd;
                 if(fdEvent->event_state == EventState_ACTIVE)
                 {
                     //todo:should add lock, because work thread may change the value

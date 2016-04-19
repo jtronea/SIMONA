@@ -25,8 +25,9 @@ typedef struct _Command
 typedef struct _Event
 {
 	int 				index;
-	int					*fd; 					//和客户端连接的文件描述符
-	int					*usfd;					//用于up stream的文件描述符
+	int					fd; 					//和客户端连接的文件描述符
+	int					efd; 					//和客户端连接的文件描述符
+	int					usfd;					//用于up stream的文件描述符
 	EventState 			event_state;			//用于标识事件状态
 	int     			event_type;				//用于标识事件类型
 	void* 				mem_space;   			//内存首地址
