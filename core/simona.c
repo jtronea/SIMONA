@@ -79,6 +79,9 @@ int delete_event(Event* event)
     ep_event.data.fd = fd;
     ep_event.events = EPOLLIN | EPOLLET; //读入,边缘触发方式  
     int s = epoll_ctl(efd, EPOLL_CTL_DEL, fd, &ep_event);
+
+    if(event->httpConnection->qParams) free(event->httpConnection->qParams);
+    if(event->httpConnection) free(event->httpConnection);
     return s;
 }
 
@@ -155,26 +158,48 @@ int init_event(Event*** eventpool, void*** mempool)
 
 int event_handle(Event* event)
 {
-    char buf[512] = {0};
-    read(event->fd, buf, sizeof(buf));
-    
-    event->httpConnection = (HttpConnection*)malloc(sizeof(HttpConnection));
-    event->httpConnection->qParams = (char*)malloc(MAX_HTTP_HEADER_GET_PARAMS_LENGTH);
-    parse_http_connection(buf, event->httpConnection);
-
-    for(int i = 0; i < strlen(buf) / 2; i++)
+    while(event->event_type & EventType_CAN_READ) //之所以用while，是因为在读数据的阶段，可能又有数据可以读
     {
-        char tmp = buf[i];
-        buf[i] = buf[strlen(buf) - i - 1];
-        buf[strlen(buf) - i - 1] = tmp;
-    }
+        event->event_type = event->event_type ^ EventType_CAN_READ;
+        char buf[512] = {0};
+        int readLength = 0;//为了进入西面的循环，所以不能设置为0
+        //todo:应该至少读一次数据之后才有可能继续触发读事件
+        //todo:数据读的时候，buf长度不够，需要进行溢出处理，还需要做保护，不能读的太多；
+        //todo:如果读的数据长度为0，那么直接跳过后面的处理
+        while( readLength = read(event->fd, buf + readLength, sizeof(buf)) )
+        {
+            if(readLength <= 0)
+            {
+                break;
+            }
+        }
+        
+        //todo:不能够每次有数据可以读的时候都分配阿，应该只有一次的时候才进行分配，后面来的可以读的时候，只有不够的时候才会进行重新分配
+        event->httpConnection = (HttpConnection*)malloc(sizeof(HttpConnection));
+        event->httpConnection->qParams = (char*)malloc(MAX_HTTP_HEADER_GET_PARAMS_LENGTH);
+        parse_http_connection(buf, event->httpConnection);
 
-    write(event->fd, buf, sizeof(buf));
-    printf("write data on fd %d\n", event->fd);
-    delete_event(event);
-    printf("remove event on fd %d\n", event->fd);
-    close(event->fd);
-    printf("close fd %d\n", event->fd);
+        memset(buf, 0, sizeof(buf));
+        memcpy(buf, event->httpConnection->qParams, strlen(event->httpConnection->qParams) );
+
+        int writeSize = write(event->fd, buf, strlen(buf));
+        if(writeSize < strlen(buf))
+        {
+            //todo：一次没有写完，添加可写事件的监听，记录需要写的数据
+            break;
+        }
+        printf("write data on fd %d\n", event->fd);
+        delete_event(event);
+        printf("remove event on fd %d\n", event->fd);
+        close(event->fd);
+        printf("close fd %d\n", event->fd);  
+
+    } 
+
+    while(event->event_type & EventType_CAN_WRITE)
+    {
+        //todo：
+    }
 }
 
 void* handle_task(void* data){
