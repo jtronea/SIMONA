@@ -1,7 +1,8 @@
-#ifndef _SIMONA_H_INCLUDED_
-#define _SIMONA_H_INCLUDED_
+#ifndef _SIMONA_SIMONA_INCLUDED_
+#define _SIMONA_SIMONA_INCLUDED_
 
 #include	"sm_base.h"
+#include 	"sm_http.h"
 
 #define MAXEVENTS 64  
 #define	SA	struct sockaddr

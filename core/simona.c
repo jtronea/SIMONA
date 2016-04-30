@@ -158,6 +158,10 @@ int event_handle(Event* event)
     char buf[512] = {0};
     read(event->fd, buf, sizeof(buf));
     
+    event->httpConnection = (HttpConnection*)malloc(sizeof(HttpConnection));
+    event->httpConnection->qParams = (char*)malloc(MAX_HTTP_HEADER_GET_PARAMS_LENGTH);
+    parse_http_connection(buf, event->httpConnection);
+
     for(int i = 0; i < strlen(buf) / 2; i++)
     {
         char tmp = buf[i];

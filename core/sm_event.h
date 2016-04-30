@@ -2,6 +2,7 @@
 #define _SIMONA_EVENT_INCLUDED_
 
 #include	"sm_base.h"
+#include 	"sm_http.h"
 
 typedef enum _EventType
 {
@@ -33,6 +34,7 @@ typedef struct _Event
 	void* 				mem_space;   			//内存首地址
 	int 				mem_offset;  			//内存偏移
 	Command* 			commands; 				//记录一系列操作的指令指令
+	HttpConnection*		httpConnection;			//记录和客户端的连接；
 	void*				callback;
 }Event;
 
